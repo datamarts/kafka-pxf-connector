@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,23 +44,25 @@ public class KafkaResolver extends BasePlugin implements Resolver {
         Schema schema = (Schema) context.getMetadata();
         try {
             GenericRecord genericRecord = new GenericData.Record(schema);
-            int cnt = 0;
-            for (OneField field : record) {
-                if (field.type == DataType.BYTEA.getOID()) {
-                    // Avro does not seem to understand regular byte arrays
-                    field.val = ByteBuffer.wrap((byte[]) field.val);
-                } else if (field.type == DataType.SMALLINT.getOID()) {
-                    // Avro doesn't have a short, just an int type
-                    field.val = (int) (short) field.val;
+            for (int i = 0; i < record.size(); i++) {
+                OneField field = record.get(i);
+                if (field.val != null) {
+                    if (field.type == DataType.BYTEA.getOID()) {
+                        // Avro does not seem to understand regular byte arrays
+                        field.val = ByteBuffer.wrap((byte[]) field.val);
+                    } else if (field.type == DataType.SMALLINT.getOID()) {
+                        // Avro doesn't have a short, just an int type
+                        field.val = ((Number) field.val).intValue();
+                    }
                 }
-                genericRecord.put(cnt++, field.val);
+                genericRecord.put(i, field.val);
             }
             LOG.debug("Incoming record {} converted to generic record {}", record, genericRecord);
             return new OneRow(null, genericRecord);
         } catch (Exception e) {
             String message = String.format("Can't resolve record %s by schema %s", record, schema);
             LOG.error(message, e);
-            throw new RuntimeException(message, e);
+            throw new IllegalArgumentException(message, e);
         }
     }
 }

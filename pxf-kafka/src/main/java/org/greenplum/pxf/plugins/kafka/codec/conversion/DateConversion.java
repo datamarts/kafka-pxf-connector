@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import org.apache.avro.LogicalType;
 import org.apache.avro.Schema;
 import org.greenplum.pxf.plugins.kafka.codec.type.DateLogicalType;
 
-import java.sql.Date;
 import java.time.LocalDate;
 
 public class DateConversion extends Conversion<String> {

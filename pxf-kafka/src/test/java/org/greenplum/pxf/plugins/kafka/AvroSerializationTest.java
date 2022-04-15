@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.common.serialization.Serializer;
+import org.greenplum.pxf.plugins.kafka.codec.AvroListEncoder;
+import org.greenplum.pxf.plugins.kafka.codec.AvroReflectEncoder;
+import org.greenplum.pxf.plugins.kafka.model.KafkaMessageKey;
 import org.greenplum.pxf.plugins.kafka.utils.AvroData;
 import org.junit.Assert;
 import org.junit.Test;
@@ -38,14 +41,13 @@ public class AvroSerializationTest {
 
     @Test
     public void testKeySerialization() throws IOException {
-        KafkaMessageKey key = KafkaMessageKey.template("test", 0, 1)
-                .withChunkInfo(0, true);
-        Serializer<KafkaMessageKey> serializer = new AvroReflectBeanSerializer<>(KafkaMessageKey.SCHEMA);
+        KafkaMessageKey key = new KafkaMessageKey("test", 0, 1, 0, true);
+        Serializer<KafkaMessageKey> serializer = new AvroReflectEncoder<>(KafkaMessageKey.getSchema());
         final byte[] bytes = serializer.serialize("test", key);
         final AvroData avro = AvroData.convert(bytes);
-        Assert.assertEquals(avro.getSchema().getName(), KafkaMessageKey.SCHEMA.getName());
-        Assert.assertEquals(avro.getSchema().getNamespace(), KafkaMessageKey.SCHEMA.getNamespace());
-        Assert.assertEquals(avro.getSchema().getFields(), KafkaMessageKey.SCHEMA.getFields());
+        Assert.assertEquals(avro.getSchema().getName(), KafkaMessageKey.getSchema().getName());
+        Assert.assertEquals(avro.getSchema().getNamespace(), KafkaMessageKey.getSchema().getNamespace());
+        Assert.assertEquals(avro.getSchema().getFields(), KafkaMessageKey.getSchema().getFields());
         Assert.assertEquals(1, avro.getRecords().size());
         Assert.assertEquals("test", avro.getRecords().get(0).get("tableName").toString());
     }
@@ -64,7 +66,7 @@ public class AvroSerializationTest {
         genericRecord.put("id", 2);
         genericRecord.put("name", "asd");
         list.add(genericRecord);
-        Serializer<List<GenericRecord>> serializer = new AvroGenericCollectionSerializer(schema);
+        Serializer<List<GenericRecord>> serializer = new AvroListEncoder(schema);
         final byte[] bytes = serializer.serialize("test", list);
         final AvroData avro = AvroData.convert(bytes);
         Assert.assertEquals(avro.getSchema().getName(), schema.getName());
@@ -90,7 +92,7 @@ public class AvroSerializationTest {
         unionList.add(Schema.create(Schema.Type.NULL));
         fields.add(new Schema.Field("name", Schema.createUnion(unionList), "", null));
         Assert.assertEquals(fields, schema.getFields());
-        Serializer<List<GenericRecord>> serializer = new AvroGenericCollectionSerializer(schema);
+        Serializer<List<GenericRecord>> serializer = new AvroListEncoder(schema);
         final byte[] bytes = serializer.serialize("test", Collections.emptyList());
         final AvroData avro = AvroData.convert(bytes);
         Assert.assertEquals(avro.getSchema().getName(), schema.getName());

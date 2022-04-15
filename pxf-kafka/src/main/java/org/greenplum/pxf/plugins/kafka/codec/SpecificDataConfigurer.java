@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,18 +25,22 @@ import org.greenplum.pxf.plugins.kafka.codec.type.DateLogicalType;
 import org.greenplum.pxf.plugins.kafka.codec.type.TimeMicrosLogicalType;
 import org.greenplum.pxf.plugins.kafka.codec.type.TimestampMicrosLogicalType;
 
-public class LogicalTypeRegistrator {
-    public static void registration() {
+public abstract class SpecificDataConfigurer {
+    static {
         GenericData.get().addLogicalTypeConversion(DateConversion.getInstance());
         GenericData.get().addLogicalTypeConversion(TimeMicrosConversion.getInstance());
         GenericData.get().addLogicalTypeConversion(TimestampMicrosConversion.getInstance());
 
-        SpecificData.get().addLogicalTypeConversion(DateConversion.getInstance());
-        SpecificData.get().addLogicalTypeConversion(TimeMicrosConversion.getInstance());
-        SpecificData.get().addLogicalTypeConversion(TimestampMicrosConversion.getInstance());
-
         LogicalTypes.register(DateLogicalType.INSTANCE.getName(), schema -> DateLogicalType.INSTANCE);
         LogicalTypes.register(TimeMicrosLogicalType.INSTANCE.getName(), schema -> TimestampMicrosLogicalType.INSTANCE);
         LogicalTypes.register(TimestampMicrosLogicalType.INSTANCE.getName(), schema -> TimestampMicrosLogicalType.INSTANCE);
+    }
+
+    protected final SpecificData specificData = new SpecificData();
+
+    public SpecificDataConfigurer() {
+        specificData.addLogicalTypeConversion(DateConversion.getInstance());
+        specificData.addLogicalTypeConversion(TimeMicrosConversion.getInstance());
+        specificData.addLogicalTypeConversion(TimestampMicrosConversion.getInstance());
     }
 }

@@ -63,6 +63,8 @@ subprojects {
 }
 
 project('pxf-kafka') {
+    version = project_version
+
     dependencies {
         implementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
     }

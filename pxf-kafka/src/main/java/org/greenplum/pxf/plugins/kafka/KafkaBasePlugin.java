@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,26 +17,21 @@ package org.greenplum.pxf.plugins.kafka;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.KafkaAdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.greenplum.pxf.api.model.BasePlugin;
 import org.greenplum.pxf.api.model.RequestContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
-public class KafkaBasePlugin extends BasePlugin {
+public abstract class KafkaBasePlugin extends BasePlugin {
 
-    private static final Logger LOG = LoggerFactory.getLogger(KafkaBasePlugin.class);
-
+    private static final String KAFKA_PROPERTY_PREFIX = "kafka.property.";
     private static final String KAFKA_SERVERS_PROPERTY_NAME = "kafka.bootstrap.servers";
     private static final String KAFKA_SERVERS_OPTION_NAME = "BOOTSTRAP_SERVERS";
-
     private static final String KAFKA_BATCH_SIZE_PROPERTY_NAME = "kafka.batch.size";
     private static final int KAFKA_BATCH_SIZE_DEFAULT_VALUE = 1;
 
@@ -46,15 +41,14 @@ public class KafkaBasePlugin extends BasePlugin {
     private static final int TOPIC_DEFAULT_PARTITION_NUMBER = 1;
     private static final short TOPIC_DEFAULT_REPLICATION_FACTOR = 1;
 
-    private static final String KAFKA_PROPERTY_PREFIX = "kafka.property.";
+    private static final String BUFFER_SIZE_PROPERTY_NAME = "kafka.buffer.size";
+    private static final int DEFAULT_BUFFER_SIZE = 1000;
 
-    protected String topic = null;
-
+    protected int bufferSize = DEFAULT_BUFFER_SIZE;
+    protected final Map<String, Object> kafkaProps = new HashMap<>();
+    protected String topic;
     protected int batchSize;
 
-    protected boolean topicAutoCreateFlag;
-
-    protected final Map<String, Object> kafkaProps = new HashMap<>();
 
     @Override
     public void initialize(RequestContext context) {
@@ -68,66 +62,58 @@ public class KafkaBasePlugin extends BasePlugin {
 
         // Required parameter, also can be auto-overwritten by user options
         String servers = configuration.get(KAFKA_SERVERS_PROPERTY_NAME);
-        assertMandatoryParameter(servers, KAFKA_SERVERS_PROPERTY_NAME, KAFKA_SERVERS_OPTION_NAME);
+        if (StringUtils.isBlank(servers)) {
+            throw new IllegalArgumentException(String.format(
+                    "Required parameter %s is missing or empty in kafka-site.xml and option %s is not specified in table definition.",
+                    KAFKA_SERVERS_PROPERTY_NAME, KAFKA_SERVERS_OPTION_NAME)
+            );
+        }
+
+        String bufferSize = configuration.get(BUFFER_SIZE_PROPERTY_NAME);
+        if (StringUtils.isNotBlank(bufferSize)) {
+            this.bufferSize = Integer.parseInt(bufferSize);
+        }
+
         LOG.debug("Bootstrap servers: '{}'", servers);
 
         batchSize = configuration.getInt(KAFKA_BATCH_SIZE_PROPERTY_NAME, KAFKA_BATCH_SIZE_DEFAULT_VALUE);
-        topicAutoCreateFlag = configuration.getBoolean(KAFKA_TOPIC_AUTO_CREATE_FLAG_PROPERTY_NAME, KAFKA_TOPIC_AUTO_CREATE_FLAG_DEFAULT_VALUE);
 
         kafkaProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
-        kafkaProps.putAll(getPropsWithPrefix(configuration, KAFKA_PROPERTY_PREFIX));
+        for (Map.Entry<String, String> property : configuration) {
+            if (property.getKey().startsWith(KAFKA_PROPERTY_PREFIX)) {
+                kafkaProps.put(property.getKey().substring(KAFKA_PROPERTY_PREFIX.length()), property.getValue());
+            }
+        }
 
         LOG.debug("Kafka properties: {}", kafkaProps);
         LOG.debug("Incoming columns: {}", context.getTupleDescription());
 
         if (!topicExists(servers, topic)) {
             throw new IllegalArgumentException(String.format(
-                    "Topic [%s] doesn't exist and parameter %s/option %s flag is set to false",
+                    "Topic [%s] doesn't exist and parameter %s/option %s flag is set to FALSE",
                     topic, KAFKA_TOPIC_AUTO_CREATE_FLAG_PROPERTY_NAME, KAFKA_TOPIC_AUTO_CREATE_FLAG_OPTION_NAME));
         }
-    }
-
-    @SuppressWarnings("SameParameterValue")
-    private static void assertMandatoryParameter(String value, String paramName, String optionName) {
-        if (StringUtils.isBlank(value)) {
-            throw new IllegalArgumentException(String.format(
-                    "Required parameter %s is missing or empty in kafka-site.xml and option %s is not specified in table definition.",
-                    paramName, optionName)
-            );
-        }
-    }
-
-    @SuppressWarnings("SameParameterValue")
-    private static Map<String, String> getPropsWithPrefix(Iterable<Map.Entry<String, String>> config, String prefix) {
-        Map<String, String> configMap = new HashMap<>();
-        for (Map.Entry<String, String> property : config) {
-            if (property.getKey().startsWith(prefix)) {
-                configMap.put(property.getKey().substring(prefix.length()), property.getValue());
-            }
-        }
-        return configMap;
     }
 
     protected boolean topicExists(String servers, String topic) {
         Properties props = new Properties();
         props.put("bootstrap.servers", servers);
-        KafkaAdminClient adminClient = (KafkaAdminClient) AdminClient.create(props);
-
-        try {
+        try (AdminClient adminClient = AdminClient.create(props)) {
+            boolean topicAutoCreateFlag = configuration.getBoolean(KAFKA_TOPIC_AUTO_CREATE_FLAG_PROPERTY_NAME, KAFKA_TOPIC_AUTO_CREATE_FLAG_DEFAULT_VALUE);
             boolean topicExists = adminClient.listTopics().names().get().contains(topic);
             if (topicExists) {
                 return true;
-            } else {
-                if(topicAutoCreateFlag) {
-                    adminClient.createTopics(Collections.singleton(new NewTopic(topic, TOPIC_DEFAULT_PARTITION_NUMBER, TOPIC_DEFAULT_REPLICATION_FACTOR)));
-                    return true;
-                } else {
-                    return false;
-                }
             }
+
+            if (topicAutoCreateFlag) {
+                adminClient.createTopics(Collections.singleton(new NewTopic(topic, TOPIC_DEFAULT_PARTITION_NUMBER, TOPIC_DEFAULT_REPLICATION_FACTOR)));
+                return true;
+            }
+
+            return false;
         } catch (Exception e) {
-            LOG.error("Cannot acquire list of topics for servers: {}!", servers, e);
-            throw new RuntimeException(String.format("Cannot acquire list of topics for server: %s!", servers), e.getCause());
+            LOG.error("Cannot acquire list of topics for servers: [{}]", servers, e);
+            throw new RuntimeException(String.format("Cannot acquire list of topics for server: [%s]", servers), e.getCause());
         }
     }
 }

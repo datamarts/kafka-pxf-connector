@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,6 @@
 package org.greenplum.pxf.plugins.kafka.codec.type;
 
 import org.apache.avro.LogicalType;
-
-import java.time.LocalTime;
 
 public class TimeMicrosLogicalType extends LogicalType {
 

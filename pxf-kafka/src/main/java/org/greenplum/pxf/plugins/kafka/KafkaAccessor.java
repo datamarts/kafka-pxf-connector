@@ -1,5 +1,5 @@
 /**
- * Copyright © 2021 kafka-pxf-connector
+ * Copyright © 2022 DATAMART LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,28 +15,38 @@
  */
 package org.greenplum.pxf.plugins.kafka;
 
-import org.apache.avro.LogicalType;
-import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.greenplum.pxf.api.OneRow;
-import org.greenplum.pxf.api.io.DataType;
 import org.greenplum.pxf.api.model.Accessor;
-import org.greenplum.pxf.plugins.kafka.exception.UnsupportedTypeException;
+import org.greenplum.pxf.plugins.kafka.model.KafkaMessageKey;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressWarnings("RedundantThrows")
 public class KafkaAccessor extends KafkaBasePlugin implements Accessor {
+    private final Object monitor = new Object();
+    private final AtomicLong activeTasks = new AtomicLong();
+    private final AtomicLong totalTasks = new AtomicLong();
+    private final AtomicLong errorCount = new AtomicLong();
+    private final AtomicReference<Throwable> firstException = new AtomicReference<>(null);
+    private final KafkaProducerSupplier kafkaProducerSupplier;
+    private KafkaMessageKey kafkaMessageKey;
+    private KafkaProducer<KafkaMessageKey, List<GenericRecord>> producer;
+    private List<GenericRecord> currentBatch;
+    private int chunkCounter = 0;
 
-    private KafkaBatchWriter writer;
+    public KafkaAccessor() {
+        kafkaProducerSupplier = new KafkaProducerSupplier();
+    }
 
-    public void setProducer(KafkaProducer<KafkaMessageKey, List<GenericRecord>> producer) {
-        kafkaProps.put(KafkaBatchWriter.KAFKA_PRODUCER_CONFIG_KEY, producer);
+    public KafkaAccessor(KafkaProducerSupplier kafkaProducerSupplier) {
+        this.kafkaProducerSupplier = kafkaProducerSupplier;
     }
 
     @Override
@@ -56,77 +66,118 @@ public class KafkaAccessor extends KafkaBasePlugin implements Accessor {
 
     @Override
     public boolean openForWrite() throws Exception {
+        try {
+            LOG.info("Opening [{}] for write in [{}]. Segment: {}, total: {}",
+                    context.getProfile(), topic, context.getSegmentId(), context.getTotalSegments());
 
-        Schema schema = Schema.createRecord("row", null, null, false);
-        schema.setFields(context.getTupleDescription().stream().map(cd -> {
-            // in this version of gpdb, external table should not set 'notnull' attribute
-            // so we should use union between NULL and another type everywhere
-            List<Schema> unionList = new ArrayList<>();
-            unionList.add(Schema.create(Schema.Type.NULL));
-            DataType type = DataType.get(cd.columnTypeCode());
-            Schema targetSchema = Schema.create(map(type));
-            getLogicalType(type)
-                .ifPresent(logicalType -> logicalType.addToSchema(targetSchema));
-            unionList.add(targetSchema);
-            Schema fieldSchema = Schema.createUnion(unionList);
-            return (new Schema.Field(cd.columnName(), fieldSchema, "", null));
-        }).collect(Collectors.toList()));
-        context.setMetadata(schema);
+            Schema schema = AvroUtils.createSchema(context.getTupleDescription());
+            context.setMetadata(schema);
+            kafkaMessageKey = new KafkaMessageKey(topic, context.getSegmentId(), context.getTotalSegments(), chunkCounter, false);
+            producer = kafkaProducerSupplier.produce(kafkaProps, schema);
+            currentBatch = new ArrayList<>(batchSize);
+            return true;
+        } catch (Exception e) {
+            LOG.error("Failed opening [{}] for write in [{}]. Segment: {}, total: {}",
+                    context.getProfile(), topic, context.getSegmentId(), context.getTotalSegments(), e);
+            safelyClose();
+            throw new IllegalStateException("Failed to open for write", e);
+        }
+    }
 
-        KafkaMessageKey keyTemplate = KafkaMessageKey.template(
-            topic, context.getSegmentId(), context.getTotalSegments());
-        writer = new KafkaBatchWriter(kafkaProps, schema, topic, keyTemplate, batchSize);
+    @Override
+    public boolean writeNextObject(OneRow onerow) throws Exception {
+        waitUntilBufferFreed();
+        currentBatch.add((GenericRecord) onerow.getData());
+
+        if (currentBatch.size() >= batchSize) {
+            writeBatch(false);
+        }
+
+        if (errorCount.get() > 0) {
+            throw new IllegalStateException("Some of the tasks completed exceptionally", firstException.get());
+        }
 
         return true;
     }
 
     @Override
-    public boolean writeNextObject(OneRow onerow) throws Exception {
-        return writer.write((GenericRecord) onerow.getData());
-    }
-
-    @Override
     public void closeForWrite() throws Exception {
-        if (writer != null) {
-            writer.close();
+        try {
+            writeBatch(true);
+
+            while (activeTasks.get() > 0 && errorCount.get() == 0) {
+                Thread.sleep(100L);
+            }
+
+            if (errorCount.get() > 0) {
+                LOG.error("Failed [{}] for write in [{}]. Errors/total: {}/{}, segment: {}, total: {}",
+                        context.getProfile(), topic, errorCount.get(), totalTasks.get(), context.getSegmentId(), context.getTotalSegments(), firstException.get());
+                throw new IllegalStateException("Some of the tasks completed exceptionally", firstException.get());
+            }
+
+            LOG.info("Closing [{}] for write in [{}]. All futures complete: {}, segment: {}, total: {}",
+                    context.getProfile(), topic, totalTasks.get(), context.getSegmentId(), context.getTotalSegments());
+        } finally {
+            safelyClose();
+            LOG.info("Closed [{}] for write in [{}], segment: {}, total: {}",
+                    context.getProfile(), topic, context.getSegmentId(), context.getTotalSegments());
         }
     }
 
-    private Schema.Type map(DataType type) {
-        switch (type) {
-            case BOOLEAN:
-                return Schema.Type.BOOLEAN;
-            case TEXT:
-            case VARCHAR:
-                return Schema.Type.STRING;
-            case TIMESTAMP:
-            case BIGINT:
-            case TIME:
-                return Schema.Type.LONG;
-            case NUMERIC:
-            case FLOAT8:
-                return Schema.Type.DOUBLE;
-            case REAL:
-                return Schema.Type.FLOAT;
-            case SMALLINT:
-            case INTEGER:
-            case DATE:
-                return Schema.Type.INT;
-            default:
-                throw new UnsupportedTypeException(type);
+    private void writeBatch(boolean last) {
+        if (currentBatch.size() > 0 || last) {
+            int currentChunk = chunkCounter++;
+            LOG.debug("Batch write [{}] in [{}]. Chunk: {}, batchSize: {}, last: {}", context.getProfile(), topic, currentChunk, currentBatch.size(), last);
+            kafkaMessageKey.setChunkNumber(currentChunk);
+            kafkaMessageKey.setLastChunk(last);
+
+            totalTasks.incrementAndGet();
+            activeTasks.incrementAndGet();
+            producer.send(new ProducerRecord<>(topic, kafkaMessageKey, currentBatch), (metadata, exception) -> {
+                if (exception != null) {
+                    LOG.error("Failed producing task [{}] in [{}]", context.getProfile(), topic, exception);
+                    firstException.compareAndSet(null, exception);
+                    errorCount.incrementAndGet();
+                }
+
+                activeTasks.decrementAndGet();
+                notifyIfBufferFreed();
+            });
+            currentBatch.clear();
         }
     }
 
-    private Optional<LogicalType> getLogicalType(DataType type) {
-        switch (type) {
-            case TIME:
-                return Optional.of(LogicalTypes.timeMicros());
-            case TIMESTAMP:
-                return Optional.of(LogicalTypes.timestampMicros());
-            case DATE:
-                return Optional.of(LogicalTypes.date());
-            default:
-                return Optional.empty();
+    protected void waitUntilBufferFreed() throws InterruptedException {
+        while (activeTasks.get() >= bufferSize) {
+            synchronized (monitor) {
+                if (activeTasks.get() >= bufferSize) {
+                    monitor.wait();
+                }
+            }
+        }
+    }
+
+    protected void notifyIfBufferFreed() {
+        synchronized (monitor) {
+            if (activeTasks.get() <= bufferSize / 10) {
+                monitor.notify();
+            }
+        }
+    }
+
+    private void safelyClose() {
+        if (producer != null) {
+            try {
+                producer.flush();
+            } catch (Exception e) {
+                LOG.error("Could not properly flush producer", e);
+            }
+
+            try {
+                producer.close();
+            } catch (Exception e) {
+                LOG.error("Could not properly close producer", e);
+            }
         }
     }
 }
