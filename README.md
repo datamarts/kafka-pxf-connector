@@ -1,3 +1,5 @@
+Project is in active development and has been moved to https://repository.datamart.ru/datamarts/kafka-pxf-connector
+
 # PXF Kafka plugin
 
 [PXF](https://gpdb.docs.pivotal.io/6-8/pxf/overview_pxf.html) plugin to write data to Kafka topic.
